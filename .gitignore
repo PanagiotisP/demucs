@@ -7,3 +7,12 @@ Session.vim
 trash
 tex
 demucs_release
+musdb18/
+evals/
+separated/
+logs/
+models/
+metadata
+checkpoints/
+*.wav
+*.mp3
