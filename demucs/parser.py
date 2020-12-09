@@ -23,24 +23,30 @@ def get_parser():
         default=default_raw,
         help="Path to raw audio, can be faster, see python3 -m demucs.raw to extract.")
     parser.add_argument("--no_raw", action="store_const", const=None, dest="raw")
+    parser.add_argument("--multi", action="store_true")
+    parser.add_argument("--band_num", type=int, default=1)
+    parser.add_argument("--copy_TCN", action="store_true")
+    parser.add_argument("--pad", action="store_true")
+    parser.add_argument("--dilation_split", action="store_true")
+    parser.add_argument("--cascade", action="store_true")
     parser.add_argument("-m",
                         "--musdb",
                         type=Path,
                         default=default_musdb,
                         help="Path to musdb root")
     parser.add_argument("--metadata", type=Path, default=Path("metadata/musdb.json"))
-    parser.add_argument("--samplerate", type=int, default=44100)
+    parser.add_argument("--samplerate", type=int, default=22050)
     parser.add_argument("--audio_channels", type=int, default=2)
     parser.add_argument("--samples",
-                        default=44100 * 10,
+                        default=22050 * 4,
                         type=int,
                         help="number of samples to feed in")
     parser.add_argument("--data_stride",
                         default=44100,
                         type=int,
                         help="Stride for chunks, shorter = longer epochs")
-    parser.add_argument("-w", "--workers", default=10, type=int, help="Loader workers")
-    parser.add_argument("--eval_workers", default=2, type=int, help="Final evaluation workers")
+    parser.add_argument("-w", "--workers", default=4, type=int, help="Loader workers")
+    parser.add_argument("--eval_workers", default=0, type=int, help="Final evaluation workers")
     parser.add_argument("-d",
                         "--device",
                         help="Device to train on, default is cuda if available else cpu")
@@ -55,7 +61,7 @@ def get_parser():
 
     parser.add_argument("--checkpoints",
                         type=Path,
-                        default=Path("checkpoints"),
+                        default=Path("../../../../../gpu-data2/ppap/checkpoints"),
                         help="Folder where to store checkpoints etc")
     parser.add_argument("--evals",
                         type=Path,
@@ -78,11 +84,11 @@ def get_parser():
                         help='Restart training, ignoring previous run')
 
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("-e", "--epochs", type=int, default=120, help="Number of epochs")
+    parser.add_argument("-e", "--epochs", type=int, default=50, help="Number of epochs")
     parser.add_argument("-r",
                         "--repeat",
                         type=int,
-                        default=2,
+                        default=1,
                         help="Repeat the train set, longer epochs")
     parser.add_argument("-b", "--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=3e-4)
@@ -94,13 +100,13 @@ def get_parser():
                         help="No data augmentation")
     parser.add_argument("--remix_group_size",
                         type=int,
-                        default=4,
+                        default=1,
                         help="Shuffle sources using group of this size. Useful to somewhat "
                         "replicate multi-gpu training "
                         "on less GPUs.")
     parser.add_argument("--shifts",
                         type=int,
-                        default=10,
+                        default=0,
                         help="Number of random shifts used for random equivariant stabilization.")
 
     # See model.py for doc
@@ -172,6 +178,7 @@ def get_name(parser, args):
     ignore_args = set([
         "checkpoints",
         "deterministic",
+        "epochs",
         "eval",
         "evals",
         "eval_cpu",
@@ -186,6 +193,7 @@ def get_name(parser, args):
         "valid",
         "workers",
         "world_size",
+        "raw",
     ])
     parts = []
     name_args = dict(args.__dict__)

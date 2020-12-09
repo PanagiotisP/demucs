@@ -76,8 +76,8 @@ def main():
                                        init_method="tcp://" + args.master,
                                        rank=args.rank,
                                        world_size=args.world_size)
-
     checkpoint = args.checkpoints / f"{name}.th"
+    print(checkpoint)
     checkpoint_tmp = args.checkpoints / f"{name}.th.tmp"
     if args.restart and checkpoint.exists():
         checkpoint.unlink()
@@ -87,7 +87,8 @@ def main():
         args.repeat = 0
         model = load_model(args.models / args.test)
     elif args.tasnet:
-        model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X)
+        model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate,, X=args.X, pad=args.pad, band_num=args.band_num,\
+        copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade)
     else:
         model = Demucs(
             audio_channels=args.audio_channels,
@@ -108,6 +109,7 @@ def main():
     model.to(device)
     if args.show:
         print(model)
+        print('parameter count: ', str(sum(p.numel() for p in model.parameters())))
         size = sizeof_fmt(4 * sum(p.numel() for p in model.parameters()))
         print(f"Model size {size}")
         return
@@ -131,8 +133,8 @@ def main():
 
     if args.rank == 0:
         done = args.logs / f"{name}.done"
-        if done.exists():
-            done.unlink()
+        # if done.exists():
+        #     done.unlink()
 
     if args.augment:
         augment = nn.Sequential(FlipSign(), FlipChannels(), Shift(args.data_stride),
@@ -155,7 +157,7 @@ def main():
         train_set = Rawset(args.raw / "train",
                            samples=samples + args.data_stride,
                            channels=args.audio_channels,
-                           streams=[0, 1, 2, 3, 4],
+                           streams=[0, 1, 2, 3, 4] if args.multi else [0, 1, 2],
                            stride=args.data_stride)
 
         valid_set = Rawset(args.raw / "valid", channels=args.audio_channels)
@@ -260,7 +262,9 @@ def main():
              save=args.save,
              split=args.split_valid,
              shifts=args.shifts,
-             workers=args.eval_workers)
+             workers=args.eval_workers,
+             samplerate=args.samplerate,
+             channels=args.audio_channels)
     model.to("cpu")
     save_model(model, args.models / f"{name}.th")
     if args.rank == 0:

@@ -3,7 +3,7 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+import numpy as np
 import argparse
 import hashlib
 import sys
@@ -191,6 +191,7 @@ def main():
     out = args.out / args.name
     out.mkdir(parents=True, exist_ok=True)
     source_names = ["drums", "bass", "other", "vocals"]
+    source_names = ["accompaniment", "vocals"]
     print(f"Separated tracks will be stored in {out.resolve()}")
     for track in args.tracks:
         if not track.exists():

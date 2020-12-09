@@ -62,9 +62,8 @@ def read(metric, path, pool=np.nanmedian):
 
 
 all_stats = defaultdict(list)
-for name in BASELINES:
-    all_stats[name] = [read(args.metric, BASELINE_EVALS / name / "test")]
-
+# for name in BASELINES:
+#     all_stats[name] = [read(args.metric, BASELINE_EVALS / name / "test")]
 for path in EVALS.iterdir():
     results = path / "results" / "test"
     if not results.exists():
@@ -83,13 +82,14 @@ for path in EVALS.iterdir():
         parts = [(k, v) for k, v in parts if k != STD_KEY]
     name = model + " " + " ".join(f"{k}={v}" for k, v in parts)
     stats = read(args.metric, results)
-    if (not stats or len(stats["drums"]) != 50):
-        print(f"Missing stats for {results}", file=sys.stderr)
-    else:
-        all_stats[name].append(stats)
+    # if (not stats or len(stats["drums"]) != 50):
+    #     print(f"Missing stats for {results}", file=sys.stderr)
+    # else:
+    all_stats[name].append(stats)
 
 metrics = [tt.leaf("score", ".2f"), tt.leaf("std", ".2f")]
 sources = ["drums", "bass", "other", "vocals"]
+sources = ["accompaniment", "vocals"]
 
 mytable = tt.table([tt.leaf("name"), tt.group("all", metrics + [tt.leaf("count")])] +
                    [tt.group(source, metrics) for idx, source in enumerate(sources)])

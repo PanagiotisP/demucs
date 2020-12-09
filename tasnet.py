@@ -72,19 +72,14 @@ class ConvTasNet(nn.Module):
                  B=256,
                  H=512,
                  P=3,
-                 X=8,
+                 X=9,
                  R=3,
                  C=2,
                  audio_channels=2,
-                 samplerate=22050,
                  norm_type="gLN",
                  causal=False,
                  mask_nonlinear='relu',
-                 pad=False,
-                 band_num=1,
-                 copy_TCN=False,
-                 dilation_split=False,
-                 cascade=False):
+                 pad=False):
         """
         Args:
             N: Number of filters in autoencoder
@@ -98,50 +93,17 @@ class ConvTasNet(nn.Module):
             norm_type: BN, gLN, cLN
             causal: causal or non-causal
             mask_nonlinear: use which non-linear function to generate mask
-            pad: use of padding in TCN or not
-            band_num: how many frequency bands to process. More practically, this is the number of parallel separator/TCN modules
-            copy_TCN: copy TCN in each band num TCN or use one with reduced parameters (//2 bottleneck size)
-            dilation_split: separate layers within one rack
-            cascade: option for dilation split, put layers in sequence than in parallel
         """
         super(ConvTasNet, self).__init__()
-        assert N % band_num == 0, 'Encoding dimension must be divisible by band num'
-        assert copy_TCN == False or band_num >= 1, 'copy_TCN is available only in multi bands models'
-        assert not dilation_split or band_num == 1, 'Each extension must be used on its own'
-        assert cascade == False or dilation_split == True, 'cascade is available only in dilation split models'
         # Hyper-parameter
         self.N, self.L, self.B, self.H, self.P, self.X, self.R, self.C = N, L, B, H, P, X, R, C
         self.norm_type = norm_type
         self.causal = causal
         self.mask_nonlinear = mask_nonlinear
-        self.audio_channels = audio_channels
         self.pad = pad
-        self.band_num = band_num
-        self.copy_TCN = copy_TCN
-        self.dilation_split = dilation_split
-        self.cascade = cascade
-        self.samplerate = samplerate
         # Components
-
         self.encoder = Encoder(L, N, audio_channels)
-        if self.dilation_split == True:
-            self.separators_num = 2
-            assert X % self.separators_num == 0, 'Dilation rates must be split equally between the TCNs'
-            self.separators = nn.ModuleList()
-            if self.cascade:
-                self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R * self.separators_num, C, norm_type, causal, mask_nonlinear, pad, dilation_group=self.separators_num, skip_non_linearity=True))
-            else:
-                for i in range(self.separators_num):
-                    self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R, C, norm_type, causal, mask_nonlinear, pad, dilation_group=i, skip_non_linearity=True))
-        elif self.band_num == 1 and self.dilation_split == False:
-            self.separator = TemporalConvNet(N, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad)
-        else:
-            self.separators = nn.ModuleList()
-            for i in range(band_num):
-                if self.copy_TCN:
-                    self.separators.append(TemporalConvNet(N // self.band_num, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad))
-                else:
-                    self.separators.append(TemporalConvNet(N // self.band_num, B // self.band_num, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad))
+        self.separator = TemporalConvNet(N, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad)
         self.decoder = Decoder(N, L, audio_channels)
         # init
         for p in self.parameters():
@@ -162,34 +124,13 @@ class ConvTasNet(nn.Module):
         Returns:
             est_source: [M, C, T]
         """
-        # print('mixture', mixture.shape)
+        #print('mixture', mixture.shape)
         mixture_w = self.encoder(mixture)
-        # print('mixture_w', mixture_w.shape)
-        split_mixture_w = torch.chunk(mixture_w, self.band_num, dim=1)
-        est_masks = []
-        est_mask = 0.
-        if self.dilation_split == True:
-            # Get the two tcn outputs and reduce them either with sum or with product
-            # Pass it from non linearity right after.
-            # Currently, reducer is manual and non linearity statically set to ReLU
-            reducer = 'sum'
-            # reducer = 'product'
-            tcn_output = 0. if reducer == 'sum' else 1.
-            for i in range(len(self.separators)):
-                if reducer == 'sum':
-                    tcn_output += self.separators[i](mixture_w)
-                elif reducer == 'product':
-                    tcn_output *= self.separators[i](mixture_w)
-            est_mask = F.relu(tcn_output)
-        elif self.band_num == 1 and self.dilation_split == False:
-            est_mask = self.separator(mixture_w)
-        else:
-            for i in range(self.band_num):
-                est_masks.append(self.separators[i](split_mixture_w[i]))
-            est_mask = torch.cat(est_masks, dim=2)
-        # print('est_mask', est_mask.shape)
+        #print('mixture_w', mixture_w.shape)
+        est_mask = self.separator(mixture_w)
+        #print('est_mask', est_mask.shape)
         est_source = self.decoder(center_trim(mixture_w,est_mask), est_mask)
-        # print('est_source', est_source.shape)
+        #print('est_source', est_source.shape)
 
         # T changed after conv1d in encoder, fix it here
         # T_origin = mixture.size(-1)
@@ -249,7 +190,7 @@ class Decoder(nn.Module):
 
 
 class TemporalConvNet(nn.Module):
-    def __init__(self, N, B, H, P, X, R, C, norm_type="gLN", causal=False, mask_nonlinear='relu', pad=False, dilation_group=0, skip_non_linearity=False):
+    def __init__(self, N, B, H, P, X, R, C, norm_type="gLN", causal=False, mask_nonlinear='relu', pad=False):
         """
         Args:
             N: Number of filters in autoencoder
@@ -262,16 +203,12 @@ class TemporalConvNet(nn.Module):
             norm_type: BN, gLN, cLN
             causal: causal or non-causal
             mask_nonlinear: use which non-linear function to generate mask
-            pad: Pad or not
-            dilation_group: Used in dilation split tests. Helps to define the starting dilation rate
         """
         super(TemporalConvNet, self).__init__()
         # Hyper-parameter
         self.C = C
         self.mask_nonlinear = mask_nonlinear
         self.pad = pad
-        self.dilation_group = dilation_group
-        self.skip_non_linearity = skip_non_linearity
         # Components
         # [M, N, K] -> [M, N, K]
         layer_norm = ChannelwiseLayerNorm(N)
@@ -279,14 +216,10 @@ class TemporalConvNet(nn.Module):
         bottleneck_conv1x1 = nn.Conv1d(N, B, 1, bias=False)
         # [M, B, K] -> [M, B, K]
         repeats = []
-        dilation_offset = 0
         for r in range(R):
             blocks = []
-            if self.dilation_group and r != 0 and r % (R / self.dilation_group) == 0:
-                dilation_offset += 1
             for x in range(X):
-                # dilation = 2**(x + self.dilation_group * X)
-                dilation = 2**(x + dilation_offset * X)
+                dilation = 2**x
                 padding = (P - 1) * dilation if causal else (P - 1) * dilation // 2
                 padding = padding if pad else 0
                 blocks += [
@@ -319,8 +252,6 @@ class TemporalConvNet(nn.Module):
         M, N, K = mixture_w.size()
         score = self.network(mixture_w)  # [M, N, K] -> [M, C*N, K]
         score = score.view(M, self.C, N, -1)  # [M, C*N, K] -> [M, C, N, K]
-        if self.skip_non_linearity:
-            return score
         if self.mask_nonlinear == 'softmax':
             est_mask = F.softmax(score, dim=1)
         elif self.mask_nonlinear == 'relu':

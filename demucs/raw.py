@@ -124,19 +124,25 @@ class MusDBSet:
 
     def __getitem__(self, index):
         track = self.mus.tracks[index]
+          
         return (track.name, AudioFile(track.path).read(channels=self.channels,
                                                        seek_time=0,
                                                        streams=self.streams,
                                                        samplerate=self.samplerate))
 
 
-def build_raw(mus, destination, normalize, workers, samplerate, channels):
+def build_raw(mus, destination, normalize, workers, samplerate, channels, multi=False):
     destination.mkdir(parents=True, exist_ok=True)
     loader = DataLoader(MusDBSet(mus, channels=channels, samplerate=samplerate),
                         batch_size=1,
                         num_workers=workers,
                         collate_fn=lambda x: x[0])
     for name, streams in tqdm.tqdm(loader):
+        if multi == False:
+            streams[1] = streams[1] + streams[2] + streams[3]
+            streams[2] = streams[4]
+            streams = streams[:3]
+        
         if normalize:
             ref = streams[0].mean(dim=0)  # use mono mixture as reference
             streams = (streams - ref.mean()) / ref.std()
@@ -154,18 +160,20 @@ def main():
 
     args = parser.parse_args()
 
-    build_raw(musdb.DB(root=args.musdb, subsets=["train"], split="train"),
+    build_raw(musdb.DB(root=args.musdb, subsets=["train"], split="train", is_wav=False),
               args.destination / "train",
               normalize=True,
               channels=args.channels,
               samplerate=args.samplerate,
-              workers=args.workers)
-    build_raw(musdb.DB(root=args.musdb, subsets=["train"], split="valid"),
+              workers=args.workers,
+              multi=False)
+    build_raw(musdb.DB(root=args.musdb, subsets=["train"], split="valid", is_wav=False),
               args.destination / "valid",
               normalize=True,
               samplerate=args.samplerate,
               channels=args.channels,
-              workers=args.workers)
+              workers=args.workers,
+              multi=False)
 
 
 if __name__ == "__main__":
