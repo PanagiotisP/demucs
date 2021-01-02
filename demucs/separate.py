@@ -191,7 +191,6 @@ def main():
     out = args.out / args.name
     out.mkdir(parents=True, exist_ok=True)
     source_names = ["drums", "bass", "other", "vocals"]
-    source_names = ["accompaniment", "vocals"]
     print(f"Separated tracks will be stored in {out.resolve()}")
     for track in args.tracks:
         if not track.exists():

@@ -87,8 +87,9 @@ def main():
         args.repeat = 0
         model = load_model(args.models / args.test)
     elif args.tasnet:
-        model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate,, X=args.X, pad=args.pad, band_num=args.band_num,\
-        copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade)
+        model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X, pad=args.pad, band_num=args.band_num,\
+        copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade, skip=args.skip, R=args.R, H=args.H, B=args.B, N=args.N, C=args.C,\
+            dwt=args.dwt)
     else:
         model = Demucs(
             audio_channels=args.audio_channels,
@@ -210,7 +211,8 @@ def main():
                                  repeat=args.repeat,
                                  seed=args.seed,
                                  workers=args.workers,
-                                 world_size=args.world_size)
+                                 world_size=args.world_size,
+                                 C=args.C)
         model.eval()
         valid_loss = validate_model(epoch,
                                     valid_set,
@@ -219,7 +221,8 @@ def main():
                                     device=device,
                                     rank=args.rank,
                                     split=args.split_valid,
-                                    world_size=args.world_size)
+                                    world_size=args.world_size,
+                                    C=args.C)
 
         duration = time.time() - begin
         if valid_loss < best_loss:

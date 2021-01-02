@@ -35,6 +35,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 from .utils import capture_init, center_trim
 
@@ -84,7 +85,9 @@ class ConvTasNet(nn.Module):
                  band_num=1,
                  copy_TCN=False,
                  dilation_split=False,
-                 cascade=False):
+                 cascade=False,
+                 skip=False,
+                 dwt=False):
         """
         Args:
             N: Number of filters in autoencoder
@@ -103,6 +106,7 @@ class ConvTasNet(nn.Module):
             copy_TCN: copy TCN in each band num TCN or use one with reduced parameters (//2 bottleneck size)
             dilation_split: separate layers within one rack
             cascade: option for dilation split, put layers in sequence than in parallel
+            skip: determines TCN output, skip or residual 
         """
         super(ConvTasNet, self).__init__()
         assert N % band_num == 0, 'Encoding dimension must be divisible by band num'
@@ -121,28 +125,33 @@ class ConvTasNet(nn.Module):
         self.dilation_split = dilation_split
         self.cascade = cascade
         self.samplerate = samplerate
+        self.skip = skip
+        self.dwt = dwt
+        self.even_pad = None
         # Components
 
-        self.encoder = Encoder(L, N, audio_channels)
+        self.encoder = Encoder(self.L // (1 if not self.dwt else 2), (N if not self.dwt else N // 2), audio_channels)
+        if self.dwt:
+            self.dwt_layer = DWaveletTransformation()
         if self.dilation_split == True:
             self.separators_num = 2
             assert X % self.separators_num == 0, 'Dilation rates must be split equally between the TCNs'
             self.separators = nn.ModuleList()
             if self.cascade:
-                self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R * self.separators_num, C, norm_type, causal, mask_nonlinear, pad, dilation_group=self.separators_num, skip_non_linearity=True))
+                self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R * self.separators_num, C, norm_type, causal, mask_nonlinear, pad, dilation_group=self.separators_num, skip_non_linearity=True, skip=self.skip, cascade=self.cascade))
             else:
                 for i in range(self.separators_num):
-                    self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R, C, norm_type, causal, mask_nonlinear, pad, dilation_group=i, skip_non_linearity=True))
+                    self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R, C, norm_type, causal, mask_nonlinear, pad, dilation_group=i, skip_non_linearity=True, skip=self.skip))
         elif self.band_num == 1 and self.dilation_split == False:
-            self.separator = TemporalConvNet(N, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad)
+            self.separator = TemporalConvNet(N, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip)
         else:
             self.separators = nn.ModuleList()
             for i in range(band_num):
                 if self.copy_TCN:
-                    self.separators.append(TemporalConvNet(N // self.band_num, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad))
+                    self.separators.append(TemporalConvNet(N // self.band_num, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip))
                 else:
-                    self.separators.append(TemporalConvNet(N // self.band_num, B // self.band_num, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad))
-        self.decoder = Decoder(N, L, audio_channels)
+                    self.separators.append(TemporalConvNet(N // self.band_num, B // self.band_num, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip))
+        self.decoder = Decoder((N if not self.dwt else N // 2), self.L // (1 if not self.dwt else 2), audio_channels)
         # init
         for p in self.parameters():
             if p.dim() > 1:
@@ -164,6 +173,11 @@ class ConvTasNet(nn.Module):
         """
         # print('mixture', mixture.shape)
         mixture_w = self.encoder(mixture)
+        if self.dwt:
+            if mixture_w.shape[-1] % 2 != 0:
+                mixture_w = F.pad(mixture_w, (0,1))
+                self.even_pad = True
+            mixture_w = self.dwt_layer(mixture_w, inverse=False)
         # print('mixture_w', mixture_w.shape)
         split_mixture_w = torch.chunk(mixture_w, self.band_num, dim=1)
         est_masks = []
@@ -172,15 +186,15 @@ class ConvTasNet(nn.Module):
             # Get the two tcn outputs and reduce them either with sum or with product
             # Pass it from non linearity right after.
             # Currently, reducer is manual and non linearity statically set to ReLU
-            reducer = 'sum'
+            reducer = 'product'
             # reducer = 'product'
             tcn_output = 0. if reducer == 'sum' else 1.
             for i in range(len(self.separators)):
                 if reducer == 'sum':
                     tcn_output += self.separators[i](mixture_w)
                 elif reducer == 'product':
-                    tcn_output *= self.separators[i](mixture_w)
-            est_mask = F.relu(tcn_output)
+                    tcn_output *= F.relu(self.separators[i](mixture_w))
+            est_mask = (F.relu(tcn_output) if reducer == 'sum' else tcn_output)
         elif self.band_num == 1 and self.dilation_split == False:
             est_mask = self.separator(mixture_w)
         else:
@@ -188,13 +202,20 @@ class ConvTasNet(nn.Module):
                 est_masks.append(self.separators[i](split_mixture_w[i]))
             est_mask = torch.cat(est_masks, dim=2)
         # print('est_mask', est_mask.shape)
-        est_source = self.decoder(center_trim(mixture_w,est_mask), est_mask)
+        mixture_w = torch.unsqueeze(center_trim(mixture_w,est_mask), 1) * est_mask  # [M, C, N, K]
+        if self.dwt:
+            mixture_w = self.dwt_layer(mixture_w, inverse=True)
+            if self.even_pad:
+                mixture_w = mixture_w[:,:,:,:-1]
+        est_source = self.decoder(mixture_w)
         # print('est_source', est_source.shape)
 
         # T changed after conv1d in encoder, fix it here
         # T_origin = mixture.size(-1)
         # T_conv = est_source.size(-1)
         # est_source = F.pad(est_source, (0, T_origin - T_conv))
+        if self.C==1:
+            est_source = torch.cat([mixture.unsqueeze(1) - est_source, est_source], dim=1)
         return est_source
 
 
@@ -219,6 +240,37 @@ class Encoder(nn.Module):
         mixture_w = F.relu(self.conv1d_U(mixture))  # [M, N, K]
         return mixture_w
 
+class DWaveletTransformation(nn.Module):
+    def __init__(self, p_scale=1, u_scale=0.5, a_scale=np.sqrt(2)):
+        super(DWaveletTransformation, self).__init__()
+        self.scales = {
+            'p': p_scale,
+            'u': u_scale,
+            'a': a_scale
+        }
+
+    def forward(self, z, inverse):
+        if not inverse:
+            z_odd, z_even = z[:,:,1::2], z[:,:,::2]
+            error = z_odd - self.scales['p']*z_even
+            signal = z_even + self.scales['u']*error
+            error = error / self.scales['a']
+            signal = signal * self.scales['a']
+            mixture_w = torch.cat((error,signal), 1)
+            return mixture_w
+        else:
+            enc_dim = z.shape[2]//2
+            error, signal = z[:, :, :enc_dim, :], z[:, :, enc_dim:, :]
+            signal = signal / self.scales['a']
+            error = error * self.scales['a']
+            z_even = signal - self.scales['u']*error
+            z_odd = error + self.scales['p']*z_even
+
+            source_w = torch.zeros((z_even.shape[0], z_even.shape[1], z_even.shape[2], z_even.shape[3]*2)).cuda()
+
+            source_w[:,:,:,1::2] = z_odd
+            source_w[:,:,:,::2] = z_even
+            return source_w
 
 class Decoder(nn.Module):
     def __init__(self, N, L, audio_channels):
@@ -229,7 +281,7 @@ class Decoder(nn.Module):
         # Components
         self.basis_signals = nn.Linear(N, audio_channels * L, bias=False)
 
-    def forward(self, mixture_w, est_mask):
+    def forward(self, mixture_w):
         """
         Args:
             mixture_w: [M, N, K]
@@ -238,8 +290,8 @@ class Decoder(nn.Module):
             est_source: [M, C, T]
         """
         # D = W * M
-        source_w = torch.unsqueeze(mixture_w, 1) * est_mask  # [M, C, N, K]
-        source_w = torch.transpose(source_w, 2, 3)  # [M, C, K, N]
+        # source_w = torch.unsqueeze(mixture_w, 1) * est_mask  # [M, C, N, K]
+        source_w = torch.transpose(mixture_w, 2, 3)  # [M, C, K, N]
         # S = DV
         est_source = self.basis_signals(source_w)  # [M, C, K, ac * L]
         m, c, k, _ = est_source.size()
@@ -249,7 +301,7 @@ class Decoder(nn.Module):
 
 
 class TemporalConvNet(nn.Module):
-    def __init__(self, N, B, H, P, X, R, C, norm_type="gLN", causal=False, mask_nonlinear='relu', pad=False, dilation_group=0, skip_non_linearity=False):
+    def __init__(self, N, B, H, P, X, R, C, norm_type="gLN", causal=False, mask_nonlinear='relu', pad=False, dilation_group=0, skip_non_linearity=False, skip=False, cascade=False):
         """
         Args:
             N: Number of filters in autoencoder
@@ -272,6 +324,8 @@ class TemporalConvNet(nn.Module):
         self.pad = pad
         self.dilation_group = dilation_group
         self.skip_non_linearity = skip_non_linearity
+        self.skip = skip
+        self.cascade = cascade
         # Components
         # [M, N, K] -> [M, N, K]
         layer_norm = ChannelwiseLayerNorm(N)
@@ -285,8 +339,10 @@ class TemporalConvNet(nn.Module):
             if self.dilation_group and r != 0 and r % (R / self.dilation_group) == 0:
                 dilation_offset += 1
             for x in range(X):
-                # dilation = 2**(x + self.dilation_group * X)
-                dilation = 2**(x + dilation_offset * X)
+                if self.cascade:
+                    dilation = 2**(x + dilation_offset * X)
+                else:
+                    dilation = 2**(x + self.dilation_group * X)
                 padding = (P - 1) * dilation if causal else (P - 1) * dilation // 2
                 padding = padding if pad else 0
                 blocks += [
@@ -298,16 +354,28 @@ class TemporalConvNet(nn.Module):
                                   dilation=dilation,
                                   norm_type=norm_type,
                                   causal=causal,
-                                  pad=self.pad)
+                                  pad=self.pad,
+                                  skip=self.skip)
                 ]
-            repeats += [nn.Sequential(*blocks)]
-        temporal_conv_net = nn.Sequential(*repeats)
+            if not self.skip:
+                repeats += [nn.Sequential(*blocks)]
+            else:
+                repeats += [nn.ModuleList(blocks)]
+        if not self.skip:
+            temporal_conv_net = nn.Sequential(*repeats)
+        else:
+            temporal_conv_net = nn.ModuleList(repeats)
+            
         # [M, B, K] -> [M, C*N, K]
         mask_conv1x1 = nn.Conv1d(B, C * N, 1, bias=False)
         # Put together
-        self.network = nn.Sequential(layer_norm, bottleneck_conv1x1, temporal_conv_net,
+        if not self.skip:
+            self.network = nn.Sequential(layer_norm, bottleneck_conv1x1, temporal_conv_net,
                                      mask_conv1x1)
-
+        else:
+            self.network = nn.Sequential(layer_norm, bottleneck_conv1x1)
+            self.temporal_conv_net = temporal_conv_net
+            self.mask_conv1x1 = mask_conv1x1
     def forward(self, mixture_w):
         """
         Keep this API same with TasNet
@@ -317,7 +385,17 @@ class TemporalConvNet(nn.Module):
             est_mask: [M, C, N, K]
         """
         M, N, K = mixture_w.size()
-        score = self.network(mixture_w)  # [M, N, K] -> [M, C*N, K]
+        if not self.skip:
+            score = self.network(mixture_w)  # [M, N, K] -> [M, C*N, K]
+        else:
+            score = self.network(mixture_w)
+            skip_connection_sum = 0.
+            residual = score
+            for rack in self.temporal_conv_net:
+                for block in rack:
+                    residual, skip = block(residual)
+                    skip_connection_sum = skip + (skip_connection_sum if self.pad else center_trim(skip_connection_sum, skip))
+            score = self.mask_conv1x1(skip_connection_sum)
         score = score.view(M, self.C, N, -1)  # [M, C*N, K] -> [M, C, N, K]
         if self.skip_non_linearity:
             return score
@@ -340,16 +418,18 @@ class TemporalBlock(nn.Module):
                  dilation,
                  norm_type="gLN",
                  causal=False,
-                 pad=False):
+                 pad=False,
+                 skip=False):
         super(TemporalBlock, self).__init__()
         self.pad = pad
+        self.skip = skip
         # [M, B, K] -> [M, H, K]
         conv1x1 = nn.Conv1d(in_channels, out_channels, 1, bias=False)
         prelu = nn.PReLU()
         norm = chose_norm(norm_type, out_channels)
         # [M, H, K] -> [M, B, K]
         dsconv = DepthwiseSeparableConv(out_channels, in_channels, kernel_size, stride, padding,
-                                        dilation, norm_type, causal, pad=self.pad)
+                                        dilation, norm_type, causal, pad=self.pad, skip=self.skip)
         # Put together
         self.net = nn.Sequential(conv1x1, prelu, norm, dsconv)
 
@@ -361,9 +441,12 @@ class TemporalBlock(nn.Module):
             [M, B, K]
         """
         residual = x
-        out = self.net(x)
+        if not self.skip:
+            out = self.net(x)
+            return out + (residual if self.pad else center_trim(residual, out))  # look like w/o F.relu is better than w/ F.relu
         # TODO: when P = 3 here works fine, but when P = 2 maybe need to pad?
-        return out + (residual if self.pad else center_trim(residual, out))  # look like w/o F.relu is better than w/ F.relu
+        out, skip = self.net(x)
+        return out + (residual if self.pad else center_trim(residual, out)), skip  # look like w/o F.relu is better than w/ F.relu
         # return F.relu(out + residual)
 
 
@@ -377,11 +460,13 @@ class DepthwiseSeparableConv(nn.Module):
                  dilation,
                  norm_type="gLN",
                  causal=False,
-                 pad=False):
+                 pad=False,
+                 skip=False):
         super(DepthwiseSeparableConv, self).__init__()
         # Use `groups` option to implement depthwise convolution
         # [M, H, K] -> [M, H, K]
         self.pad = pad
+        self.skip = skip
         depthwise_conv = nn.Conv1d(in_channels,
                                    in_channels,
                                    kernel_size,
@@ -399,6 +484,10 @@ class DepthwiseSeparableConv(nn.Module):
         # Put together
         if causal:
             self.net = nn.Sequential(depthwise_conv, chomp, prelu, norm, pointwise_conv)
+        elif self.skip:
+            self.net = nn.Sequential(depthwise_conv, prelu, norm)
+            self.pointwise_conv = pointwise_conv
+            self.skip_conv = nn.Conv1d(in_channels, out_channels, 1, bias=False)
         else:
             self.net = nn.Sequential(depthwise_conv, prelu, norm, pointwise_conv)
 
@@ -409,6 +498,11 @@ class DepthwiseSeparableConv(nn.Module):
         Returns:
             result: [M, B, K]
         """
+        if self.skip:
+            out = self.net(x)
+            residual = self.pointwise_conv(out)
+            skip = self.skip_conv(out)
+            return residual, skip
         return self.net(x)
 
 

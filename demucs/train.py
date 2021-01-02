@@ -24,7 +24,8 @@ def train_model(epoch,
                 seed=None,
                 workers=4,
                 world_size=1,
-                batch_size=16):
+                batch_size=16,
+                C=2):
 
     if world_size > 1:
         sampler = DistributedSampler(dataset)
@@ -55,6 +56,9 @@ def train_model(epoch,
             mix = sources.sum(dim=1)
 
             estimates = model(mix)
+            if C == 1:
+                estimates = estimates[:,1].unsqueeze(1)
+                sources = sources[:, 1].unsqueeze(1)
             sources = center_trim(sources, estimates)
             loss = criterion(estimates, sources)
             loss.backward()
@@ -84,7 +88,8 @@ def validate_model(epoch,
                    rank=0,
                    world_size=1,
                    shifts=0,
-                   split=False):
+                   split=False,
+                   C=2):
     indexes = range(rank, len(dataset), world_size)
     tq = tqdm.tqdm(indexes,
                    ncols=120,
@@ -101,6 +106,9 @@ def validate_model(epoch,
         sources = streams[1:]
         mix = streams[0]
         estimates = apply_model(model, mix, shifts=shifts, split=split)
+        if C == 1:
+            sources = sources[1]
+            sources = sources.unsqueeze(0)
         loss = criterion(estimates, sources)
         current_loss += loss.item() / len(indexes)
         del estimates, streams, sources

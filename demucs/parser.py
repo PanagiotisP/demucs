@@ -29,6 +29,8 @@ def get_parser():
     parser.add_argument("--pad", action="store_true")
     parser.add_argument("--dilation_split", action="store_true")
     parser.add_argument("--cascade", action="store_true")
+    parser.add_argument("--skip", action="store_true")
+    parser.add_argument("--dwt", action="store_true")
     parser.add_argument("-m",
                         "--musdb",
                         type=Path,
@@ -161,6 +163,11 @@ def get_parser():
                         action="store_true",
                         help="Predict chunks by chunks for valid and test. Required for tasnet")
     parser.add_argument("--X", type=int, default=8)
+    parser.add_argument("--R", type=int, default=3)
+    parser.add_argument("--N", type=int, default=256)
+    parser.add_argument("--H", type=int, default=512)
+    parser.add_argument("--B", type=int, default=256)
+    parser.add_argument("--C", type=int, default=2)
 
     parser.add_argument("--show",
                         action="store_true",
