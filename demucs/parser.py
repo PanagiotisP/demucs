@@ -10,17 +10,10 @@ from pathlib import Path
 
 
 def get_parser():
-    parser = argparse.ArgumentParser("demucs", description="Train and evaluate Demucs.")
-    default_raw = None
-    default_musdb = None
-    if 'DEMUCS_RAW' in os.environ:
-        default_raw = Path(os.environ['DEMUCS_RAW'])
-    if 'DEMUCS_MUSDB' in os.environ:
-        default_musdb = Path(os.environ['DEMUCS_MUSDB'])
+    parser = argparse.ArgumentParser("demucs", description="Train and evaluate Conv TasNet.")
     parser.add_argument(
         "--raw",
         type=Path,
-        default=default_raw,
         help="Path to raw audio, can be faster, see python3 -m demucs.raw to extract.")
     parser.add_argument("--no_raw", action="store_const", const=None, dest="raw")
     parser.add_argument("--multi", action="store_true")
@@ -30,14 +23,16 @@ def get_parser():
     parser.add_argument("--dilation_split", action="store_true")
     parser.add_argument("--cascade", action="store_true")
     parser.add_argument("--skip", action="store_true")
-    parser.add_argument("--dwt", action="store_true")
+    parser.add_argument("--dwt_latent", action="store_true", help="Adds a DWT layer after the encoder(s) to be applied on the latent representation")
+    parser.add_argument("--dwt", action="store_true", help="Adds a DWT layer before the encoder(s) to be applied on the natural signal")
+    parser.add_argument("--learnable", type=str, default='none', help="Adds a learnable layer to match DWT transformation")
+    parser.add_argument("--denoiser", type=str)
     parser.add_argument("-m",
                         "--musdb",
                         type=Path,
-                        default=default_musdb,
                         help="Path to musdb root")
     parser.add_argument("--metadata", type=Path, default=Path("metadata/musdb.json"))
-    parser.add_argument("--samplerate", type=int, default=22050)
+    parser.add_argument("--sr", type=int, default=22050)
     parser.add_argument("--audio_channels", type=int, default=2)
     parser.add_argument("--samples",
                         default=22050 * 4,
@@ -159,6 +154,8 @@ def get_parser():
 
     # Tasnet options
     parser.add_argument("--tasnet", action="store_true")
+    parser.add_argument("--seq", action="store_true")
+    parser.add_argument("--deep_supervision", action="store_true")
     parser.add_argument("--split_valid",
                         action="store_true",
                         help="Predict chunks by chunks for valid and test. Required for tasnet")
@@ -168,6 +165,7 @@ def get_parser():
     parser.add_argument("--H", type=int, default=512)
     parser.add_argument("--B", type=int, default=256)
     parser.add_argument("--C", type=int, default=2)
+    parser.add_argument("--L", type=int, default=20)
 
     parser.add_argument("--show",
                         action="store_true",

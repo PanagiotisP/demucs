@@ -65,6 +65,162 @@ def overlap_and_add(signal, frame_step):
     return result
 
 
+class SeqConvTasNet(nn.Module):
+    @capture_init
+    def __init__(self,
+                 N=256,
+                 L=20,
+                 B=256,
+                 H=512,
+                 P=3,
+                 X=9,
+                 R=3,
+                 C=2,
+                 audio_channels=2,
+                 norm_type="gLN",
+                 causal=False,
+                 mask_nonlinear='relu',
+                 pad=False,
+                 band_num=1,
+                 copy_TCN=False,
+                 dilation_split=False,
+                 cascade=False,
+                 skip=False,
+                 dwt=False,
+                 deep_supervision=False,
+                 samplerate=22050,
+                 learnable='none'):
+        """
+        Args:
+            N: Number of filters in autoencoder
+            L: Length of the filters (in samples)
+            B: Number of channels in bottleneck 1 × 1-conv block
+            H: Number of channels in convolutional blocks
+            P: Kernel size in convolutional blocks
+            X: Number of convolutional blocks in each repeat
+            R: Number of repeats
+            C: Number of speakers
+            norm_type: BN, gLN, cLN
+            causal: causal or non-causal
+            mask_nonlinear: use which non-linear function to generate mask
+            pad: use of padding in TCN or not
+            band_num: how many frequency bands to process. More practically, this is the number of parallel separator/TCN modules
+            copy_TCN: copy TCN in each band num TCN or use one with reduced parameters (//2 bottleneck size)
+            dilation_split: separate layers within one rack
+            cascade: option for dilation split, put layers in sequence than in parallel
+            skip: determines TCN output, skip or residual
+            learnable: 'none', 'normal', 'inverse', 'both' determines learnable initial transformation layer to be paired with dwt
+        """
+        super(SeqConvTasNet, self).__init__()
+        assert N % band_num == 0, 'Encoding dimension must be divisible by band num'
+        assert copy_TCN == False or band_num >= 1, 'copy_TCN is available only in multi bands models'
+        assert not dilation_split or band_num == 1, 'Each extension must be used on its own'
+        assert cascade == False or dilation_split == True, 'cascade is available only in dilation split models'
+        # Hyper-parameter
+        self.N, self.L, self.B, self.H, self.P, self.X, self.R, self.C = N, L, B, H, P, X, R, C
+        self.norm_type = norm_type
+        self.causal = causal
+        self.mask_nonlinear = mask_nonlinear
+        self.pad = pad
+        self.band_num = band_num
+        self.copy_TCN = copy_TCN
+        self.dilation_split = dilation_split
+        self.cascade = cascade
+        self.skip = skip
+        self.dwt = dwt
+        self.even_pad = None
+        self.deep_supervision = deep_supervision
+        self.learnable = learnable
+        self.samplerate=samplerate
+        # Components
+        if self.learnable == 'normal':
+            self.learnable_transform = nn.Sequential(nn.Conv1d(audio_channels, audio_channels*2, P, padding=1, bias=False), nn.AvgPool(2, padding=1))
+        elif self.learnable == 'inverse':
+            # nn.Sequential needs to be removed here (it will destroy saved checkpoints)
+            self.learnable_inverse_transform = nn.Sequential(nn.ConvTranspose1d(audio_channels*2, audio_channels, P, padding=1, stride=2, bias=False, output_padding=1))
+        elif self.learnable == 'both':
+            self.learnable_transform = nn.Sequential(nn.Conv1d(audio_channels, audio_channels*2, P, padding=1,  bias=False), nn.AvgPool(2, padding=1))
+            # nn.Sequential needs to be removed here (it will destroy saved checkpoints)
+            self.learnable_inverse_transform = nn.Sequential(nn.ConvTranspose1d(audio_channels*2, audio_channels, P, padding=1, stride=2, bias=False, output_padding=1))
+        if self.dwt:
+            self.dwt_layer = DWaveletTransformation()
+            self.conv_tasnet1 = ConvTasNet(audio_channels=audio_channels, samplerate=self.samplerate, X=X, pad=pad, band_num=band_num,\
+                copy_TCN=copy_TCN, dilation_split=dilation_split, cascade=cascade, skip=skip, R=R, H=H, B=B, N=N, C=C, L=L, \
+                    dwt=False)
+            self.conv_tasnet2 = ConvTasNet(audio_channels=audio_channels, samplerate=self.samplerate, X=X, pad=pad, band_num=band_num,\
+                copy_TCN=copy_TCN, dilation_split=dilation_split, cascade=cascade, skip=skip, R=R, H=H, B=B, N=N, C=C, L=L, \
+                    dwt=False)
+
+        else:
+            self.conv_tasnet1 = ConvTasNet(audio_channels=audio_channels, samplerate=self.samplerate, X=X // 2, pad=pad, band_num=band_num,\
+                copy_TCN=copy_TCN, dilation_split=dilation_split, cascade=cascade, skip=skip, R=R, H=H, B=B, N=N, C=C,\
+                    dwt=dwt)
+            self.conv_tasnet2 = ConvTasNet(audio_channels=audio_channels, samplerate=self.samplerate, X=X // 2, pad=pad, band_num=band_num,\
+                copy_TCN=copy_TCN, dilation_split=dilation_split, cascade=cascade, skip=skip, R=R, H=H, B=B, N=N, C=1,\
+                    dwt=dwt, dilation_offset=1)
+            self.conv_tasnet3 = ConvTasNet(audio_channels=audio_channels, samplerate=self.samplerate, X=X // 2, pad=pad, band_num=band_num,\
+                copy_TCN=copy_TCN, dilation_split=dilation_split, cascade=cascade, skip=skip, R=R, H=H, B=B, N=N, C=1,\
+                    dwt=dwt, dilation_offset=1)
+    
+    def valid_length(self, length):
+        return self.conv_tasnet2.valid_length(self.conv_tasnet2.valid_length(length))
+    
+    def forward(self, mixture):
+        """
+        Args:
+            mixture: [M, T], M is batch size, T is #samples
+        Returns:
+            est_source: [M, C, T]
+        """
+        if self.dwt:
+            if self.learnable != 'normal' and self.learnable != 'both':
+                dwt_output = self.dwt_layer(mixture, False)
+            else:
+                dwt_output = self.learnable_transform(mixture)
+
+            low = dwt_output[:,:mixture.shape[1]]
+
+            high = dwt_output[:,mixture.shape[1]:]
+
+            est_source_1 = self.conv_tasnet1(low)
+            low_1, low_2 = est_source_1[:, 0], est_source_1[:, 1]
+            est_source_2 = self.conv_tasnet2(high)
+            high_1, high_2 = est_source_2[:, 0], est_source_2[:, 1]
+
+            if self.learnable != 'inverse' and self.learnable != 'both':
+                clean_signal_1 = self.dwt_layer(torch.cat([low_1.unsqueeze(1), high_1.unsqueeze(1)], dim=2), True)
+                clean_signal_2 = self.dwt_layer(torch.cat([low_2.unsqueeze(1), high_2.unsqueeze(1)], dim=2), True)
+            else:
+                clean_signal_1 = self.learnable_inverse_transform(torch.cat([low_1, high_1], dim=1)).unsqueeze(1)
+                clean_signal_2 = self.learnable_inverse_transform(torch.cat([low_2, high_2], dim=1)).unsqueeze(1)
+
+            est_source = torch.cat([clean_signal_1, clean_signal_2], dim=1)
+
+        else:
+            est_source1 = self.conv_tasnet1(mixture)
+            high_1_low_1_2 = est_source1[:,0]
+            high_2_low_1_2 = est_source1[:,1]
+
+            est_source2 = self.conv_tasnet2(high_1_low_1_2)
+            est_source3 = self.conv_tasnet3(high_2_low_1_2)
+
+            # high_1_low_1 = est_source2[:,0]
+            # low_2 = est_source2[:, 1]
+
+            # high_2_low_2 = est_source3[:,0]
+            # low_1 = est_source3[:, 1]
+            
+            # clean_signal_1 = (high_1_low_1 + center_trim(high_1_low_1_2 - low_2, high_1_low_1)) / 2
+            # clean_signal_2 = (high_2_low_2 + center_trim(high_2_low_1_2 - low_1, high_2_low_2)) / 2
+
+            clean_signal_1 = est_source2[:, 1]
+            clean_signal_2 = est_source3[:, 1]
+            if self.deep_supervision and self.training:
+                est_source = torch.cat([clean_signal_1.unsqueeze(1), clean_signal_2.unsqueeze(1), high_1_low_1_2.unsqueeze(1), high_2_low_1_2.unsqueeze(1)], dim=1)
+            else:
+                est_source = torch.cat([clean_signal_1.unsqueeze(1), clean_signal_2.unsqueeze(1)], dim=1)
+        return est_source
+
 class ConvTasNet(nn.Module):
     @capture_init
     def __init__(self,
@@ -87,7 +243,9 @@ class ConvTasNet(nn.Module):
                  dilation_split=False,
                  cascade=False,
                  skip=False,
-                 dwt=False):
+                 dwt=False,
+                 dilation_offset=0,
+                 denoiser=None):
         """
         Args:
             N: Number of filters in autoencoder
@@ -106,7 +264,8 @@ class ConvTasNet(nn.Module):
             copy_TCN: copy TCN in each band num TCN or use one with reduced parameters (//2 bottleneck size)
             dilation_split: separate layers within one rack
             cascade: option for dilation split, put layers in sequence than in parallel
-            skip: determines TCN output, skip or residual 
+            skip: determines TCN output, skip or residual
+            dilation_offset: determines the starting dilation measured in steps of layers (X)
         """
         super(ConvTasNet, self).__init__()
         assert N % band_num == 0, 'Encoding dimension must be divisible by band num'
@@ -127,8 +286,13 @@ class ConvTasNet(nn.Module):
         self.samplerate = samplerate
         self.skip = skip
         self.dwt = dwt
+        self.dilation_offset = dilation_offset
         self.even_pad = None
+        self.denoiser = denoiser
         # Components
+        if self.denoiser == 'wavenet':
+            self.denoisers = nn.ModuleList([WavenetDenoiser(pad=self.pad) for i in range(C)])
+
 
         self.encoder = Encoder(self.L // (1 if not self.dwt else 2), (N if not self.dwt else N // 2), audio_channels)
         if self.dwt:
@@ -138,19 +302,19 @@ class ConvTasNet(nn.Module):
             assert X % self.separators_num == 0, 'Dilation rates must be split equally between the TCNs'
             self.separators = nn.ModuleList()
             if self.cascade:
-                self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R * self.separators_num, C, norm_type, causal, mask_nonlinear, pad, dilation_group=self.separators_num, skip_non_linearity=True, skip=self.skip, cascade=self.cascade))
+                self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R * self.separators_num, C, norm_type, causal, mask_nonlinear, pad, dilation_group=self.separators_num, skip_non_linearity=True, skip=self.skip, cascade=self.cascade, dilation_offset=self.dilation_offset))
             else:
                 for i in range(self.separators_num):
-                    self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R, C, norm_type, causal, mask_nonlinear, pad, dilation_group=i, skip_non_linearity=True, skip=self.skip))
+                    self.separators.append(TemporalConvNet(N, B, H, P, X // self.separators_num, R, C, norm_type, causal, mask_nonlinear, pad, dilation_group=i, skip_non_linearity=True, skip=self.skip, dilation_offset=self.dilation_offset))
         elif self.band_num == 1 and self.dilation_split == False:
-            self.separator = TemporalConvNet(N, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip)
+            self.separator = TemporalConvNet(N, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip, dilation_offset=self.dilation_offset)
         else:
             self.separators = nn.ModuleList()
             for i in range(band_num):
                 if self.copy_TCN:
-                    self.separators.append(TemporalConvNet(N // self.band_num, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip))
+                    self.separators.append(TemporalConvNet(N // self.band_num, B, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip, dilation_offset=self.dilation_offset))
                 else:
-                    self.separators.append(TemporalConvNet(N // self.band_num, B // self.band_num, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip))
+                    self.separators.append(TemporalConvNet(N // self.band_num, B // self.band_num, H, P, X, R, C, norm_type, causal, mask_nonlinear, pad, skip=self.skip, dilation_offset=self.dilation_offset))
         self.decoder = Decoder((N if not self.dwt else N // 2), self.L // (1 if not self.dwt else 2), audio_channels)
         # init
         for p in self.parameters():
@@ -216,7 +380,59 @@ class ConvTasNet(nn.Module):
         # est_source = F.pad(est_source, (0, T_origin - T_conv))
         if self.C==1:
             est_source = torch.cat([mixture.unsqueeze(1) - est_source, est_source], dim=1)
+        
+        if self.denoiser is not None:
+            denoiser_out = []
+            batch, instr_num, channels, samples = est_source.shape
+            magic_split_num = 25
+            # rebatched_data = torch.stack(est_source.split(magic_split_num, 3)).reshape(batch * magic_split_num, instr_num, channels, -1)
+            for i in range(len(self.denoisers)):
+                # 44100 // 25 = 1764
+
+                # M, channels, samples -> 25, M, channels, samples//25 -> 25*M, channels, samples//25
+                denoiser_out.append(self.denoisers[i](est_source[:, i]))
+            # C * [25*M, channels, samples//25] -> 25*M, C, channels, samples//25 -> 25, M, C, channels, samples//25 -> M, C, channels, 25, samples//25
+            denoiser_out = torch.stack(denoiser_out, dim=1) #.reshape(magic_split_num, batch, instr_num, channels, -1).permute(1,2,3,0,4).reshape(batch, instr_num, channels, -1)
+            return torch.stack((est_source, denoiser_out), dim=0)
         return est_source
+
+
+class WavenetDenoiser(nn.Module):
+    def __init__(self, stacks=8, kernel=3, hidden=128, mask_nonlinear='relu', pad=False, audio_channels=2):
+        super(WavenetDenoiser, self).__init__()
+
+        self.stacks = stacks
+        self.kernel = kernel
+        self.mask_nonlinear = mask_nonlinear
+        self.pad = pad
+        self.audio_channels = audio_channels
+
+        self.bottleneck = nn.Conv1d(audio_channels, hidden, kernel, padding=(kernel-1)//2)
+        self.blocks = nn.ModuleList([nn.ModuleDict({
+          'in_conv': nn.Conv1d(hidden, hidden, kernel, padding=2**n*(kernel-1)//2 if pad else 0, dilation=2**n),
+          'skip_conv': nn.Conv1d(hidden, hidden, 1, padding=0),
+          'res_conv': nn.Conv1d(hidden, hidden, kernel, padding=(kernel-1)//2 if pad else 0)
+        }) for n in range(0, self.stacks)])
+
+        self.conv_out = nn.Sequential(nn.Conv1d(hidden, hidden//2, kernel, padding=(kernel - 1)//2), nn.ReLU(), nn.Conv1d(hidden//2, hidden//4, kernel, padding=(kernel - 1)//2),\
+            nn.ReLU(), nn.Conv1d(hidden//4, audio_channels, kernel, padding=(kernel - 1)//2))
+
+    def forward(self, mixture_w):
+        data_out = self.bottleneck(mixture_w)
+        if self.mask_nonlinear == 'relu':
+            data_out = F.relu(data_out)
+
+        skip_conns = []
+        for block in self.blocks:
+            hidden = torch.sigmoid(block['in_conv'](data_out))
+            res, skip = torch.split(hidden, hidden.shape[1]//2, 1)
+            res = block['res_conv'](hidden)
+            skip = block['skip_conv'](hidden)
+            skip_conns.append(skip)
+            data_out = res + data_out
+        data_out = F.relu((torch.stack(skip_conns).sum(dim=0)))
+
+        return self.conv_out(data_out)
 
 
 class Encoder(nn.Module):
@@ -301,7 +517,7 @@ class Decoder(nn.Module):
 
 
 class TemporalConvNet(nn.Module):
-    def __init__(self, N, B, H, P, X, R, C, norm_type="gLN", causal=False, mask_nonlinear='relu', pad=False, dilation_group=0, skip_non_linearity=False, skip=False, cascade=False):
+    def __init__(self, N, B, H, P, X, R, C, norm_type="gLN", causal=False, mask_nonlinear='relu', pad=False, dilation_group=0, skip_non_linearity=False, skip=False, cascade=False, dilation_offset=0):
         """
         Args:
             N: Number of filters in autoencoder
@@ -316,6 +532,7 @@ class TemporalConvNet(nn.Module):
             mask_nonlinear: use which non-linear function to generate mask
             pad: Pad or not
             dilation_group: Used in dilation split tests. Helps to define the starting dilation rate
+            dilation_offset: determines the starting dilation rate measured in steps of layers (X)
         """
         super(TemporalConvNet, self).__init__()
         # Hyper-parameter
@@ -333,7 +550,7 @@ class TemporalConvNet(nn.Module):
         bottleneck_conv1x1 = nn.Conv1d(N, B, 1, bias=False)
         # [M, B, K] -> [M, B, K]
         repeats = []
-        dilation_offset = 0
+        self.dilation_offset = dilation_offset
         for r in range(R):
             blocks = []
             if self.dilation_group and r != 0 and r % (R / self.dilation_group) == 0:
@@ -342,7 +559,7 @@ class TemporalConvNet(nn.Module):
                 if self.cascade:
                     dilation = 2**(x + dilation_offset * X)
                 else:
-                    dilation = 2**(x + self.dilation_group * X)
+                    dilation = 2**(x + (self.dilation_group + self.dilation_offset) * X)
                 padding = (P - 1) * dilation if causal else (P - 1) * dilation // 2
                 padding = padding if pad else 0
                 blocks += [

@@ -92,7 +92,7 @@ def human_seconds(seconds, display='.2f'):
     return f"{format(value, display)} {last}"
 
 
-def apply_model(model, mix, shifts=None, split=False, progress=False):
+def apply_model(model, mix, shifts=None, split=False, progress=False, denoiser=False):
     """
     Apply model to a given mixture.
 
@@ -117,7 +117,7 @@ def apply_model(model, mix, shifts=None, split=False, progress=False):
             offsets = tqdm.tqdm(offsets, unit_scale=scale, ncols=120, unit='seconds')
         for offset in offsets:
             chunk = mix[..., offset:offset + shift]
-            chunk_out = apply_model(model, chunk, shifts=shifts)
+            chunk_out = apply_model(model, chunk, shifts=shifts, denoiser=denoiser)
             out[..., offset:offset + shift] = chunk_out
             offset += shift
         return out
@@ -129,7 +129,7 @@ def apply_model(model, mix, shifts=None, split=False, progress=False):
         out = 0
         for offset in offsets[:shifts]:
             shifted = mix[..., offset:offset + length + max_shift]
-            shifted_out = apply_model(model, shifted)
+            shifted_out = apply_model(model, shifted, denoiser=denoiser)
             out += shifted_out[..., max_shift - offset:max_shift - offset + length]
         out /= shifts
         return out
@@ -138,7 +138,10 @@ def apply_model(model, mix, shifts=None, split=False, progress=False):
         delta = valid_length - length
         padded = F.pad(mix, (delta // 2, delta - delta // 2))
         with th.no_grad():
-            out = model(padded.unsqueeze(0))[0]
+            if denoiser:
+                out = model(padded.unsqueeze(0))[1][0]
+            else:
+                out = model(padded.unsqueeze(0))[0]
         return center_trim(out, mix)
 
 

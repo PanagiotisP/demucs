@@ -164,13 +164,13 @@ def main():
               args.destination / "train",
               normalize=True,
               channels=args.channels,
-              samplerate=args.samplerate,
+              samplerate=args.sr,
               workers=args.workers,
               multi=False)
     build_raw(musdb.DB(root=args.musdb, subsets=["train"], split="valid", is_wav=False),
               args.destination / "valid",
               normalize=True,
-              samplerate=args.samplerate,
+              samplerate=args.sr,
               channels=args.channels,
               workers=args.workers,
               multi=False)

@@ -20,7 +20,7 @@ from .compressed import StemsSet, build_musdb_metadata, get_musdb_tracks
 from .model import Demucs
 from .parser import get_name, get_parser
 from .raw import Rawset
-from .tasnet import ConvTasNet
+from .tasnet import ConvTasNet, SeqConvTasNet
 from .test import evaluate
 from .train import train_model, validate_model
 from .utils import human_seconds, load_model, save_model, sizeof_fmt
@@ -87,9 +87,14 @@ def main():
         args.repeat = 0
         model = load_model(args.models / args.test)
     elif args.tasnet:
-        model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X, pad=args.pad, band_num=args.band_num,\
-        copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade, skip=args.skip, R=args.R, H=args.H, B=args.B, N=args.N, C=args.C,\
-            dwt=args.dwt)
+        if args.seq:
+            model = SeqConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X, pad=args.pad, band_num=args.band_num,\
+            copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade, skip=args.skip, R=args.R, H=args.H, B=args.B, N=args.N, C=args.C,\
+                L=args.L, dwt=args.dwt, deep_supervision=args.deep_supervision, learnable=args.learnable)
+        else:
+            model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X, pad=args.pad, band_num=args.band_num,\
+            copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade, skip=args.skip, R=args.R, H=args.H, B=args.B, N=args.N, C=args.C,\
+                L=args.L, dwt=args.dwt, denoiser=args.denoiser)
     else:
         model = Demucs(
             audio_channels=args.audio_channels,
@@ -168,17 +173,17 @@ def main():
         if args.world_size > 1:
             distributed.barrier()
         metadata = json.load(open(args.metadata))
-        duration = Fraction(samples + args.data_stride, args.samplerate)
-        stride = Fraction(args.data_stride, args.samplerate)
+        duration = Fraction(samples + args.data_stride, args.sr)
+        stride = Fraction(args.data_stride, args.sr)
         train_set = StemsSet(get_musdb_tracks(args.musdb, subsets=["train"], split="train"),
                              metadata,
                              duration=duration,
                              stride=stride,
-                             samplerate=args.samplerate,
+                             samplerate=args.sr,
                              channels=args.audio_channels)
         valid_set = StemsSet(get_musdb_tracks(args.musdb, subsets=["train"], split="valid"),
                              metadata,
-                             samplerate=args.samplerate,
+                             samplerate=args.sr,
                              channels=args.audio_channels)
 
     best_loss = float("inf")
@@ -212,7 +217,9 @@ def main():
                                  seed=args.seed,
                                  workers=args.workers,
                                  world_size=args.world_size,
-                                 C=args.C)
+                                 C=args.C,
+                                 deep_supervision=args.deep_supervision,
+                                 denoiser=args.denoiser)
         model.eval()
         valid_loss = validate_model(epoch,
                                     valid_set,
@@ -222,7 +229,8 @@ def main():
                                     rank=args.rank,
                                     split=args.split_valid,
                                     world_size=args.world_size,
-                                    C=args.C)
+                                    C=args.C,
+                                    denoiser=args.denoiser)
 
         duration = time.time() - begin
         if valid_loss < best_loss:
@@ -266,8 +274,9 @@ def main():
              split=args.split_valid,
              shifts=args.shifts,
              workers=args.eval_workers,
-             samplerate=args.samplerate,
-             channels=args.audio_channels)
+             samplerate=args.sr,
+             channels=args.audio_channels,
+             denoiser=args.denoiser)
     model.to("cpu")
     save_model(model, args.models / f"{name}.th")
     if args.rank == 0:

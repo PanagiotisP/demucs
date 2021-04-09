@@ -9,6 +9,7 @@ import sys
 import tqdm
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+import torch
 
 from .utils import apply_model, average_metric, center_trim
 
@@ -25,7 +26,9 @@ def train_model(epoch,
                 workers=4,
                 world_size=1,
                 batch_size=16,
-                C=2):
+                C=2,
+                deep_supervision=False,
+                denoiser=False):
 
     if world_size > 1:
         sampler = DistributedSampler(dataset)
@@ -55,12 +58,29 @@ def train_model(epoch,
             sources = augment(sources)
             mix = sources.sum(dim=1)
 
-            estimates = model(mix)
+            if denoiser:
+                intermediate, estimates = model(mix)
+            else:
+                estimates = model(mix)
             if C == 1:
                 estimates = estimates[:,1].unsqueeze(1)
                 sources = sources[:, 1].unsqueeze(1)
             sources = center_trim(sources, estimates)
-            loss = criterion(estimates, sources)
+
+            if denoiser:
+                loss = (criterion(estimates, sources) + criterion(intermediate, sources))/2
+                # print('\n')
+                # print(criterion(estimates, sources))
+                # print(criterion(intermediate, sources))
+                # print(loss.item())
+            else:
+                if deep_supervision:
+                    loss = criterion(estimates, torch.cat([sources, sources], dim=1))
+                else:
+                    loss = criterion(estimates, sources)
+                    # print('\n')
+                    # print(criterion(estimates, sources))
+                    # print(loss.item())
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -89,7 +109,8 @@ def validate_model(epoch,
                    world_size=1,
                    shifts=0,
                    split=False,
-                   C=2):
+                   C=2,
+                   denoiser=False):
     indexes = range(rank, len(dataset), world_size)
     tq = tqdm.tqdm(indexes,
                    ncols=120,

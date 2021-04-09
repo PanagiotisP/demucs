@@ -115,6 +115,7 @@ def main():
                              "Quantized model is about 4 times smaller but might worsen "
                              "slightly quality.")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--denoiser", type=str)
     parser.add_argument("-o",
                         "--out",
                         type=Path,
@@ -191,6 +192,7 @@ def main():
     out = args.out / args.name
     out.mkdir(parents=True, exist_ok=True)
     source_names = ["drums", "bass", "other", "vocals"]
+    source_names = ["accompaniment", "vocals"]
     print(f"Separated tracks will be stored in {out.resolve()}")
     for track in args.tracks:
         if not track.exists():
@@ -205,7 +207,7 @@ def main():
         wav = (wav * 2**15).round() / 2**15
         ref = wav.mean(0)
         wav = (wav - ref.mean()) / ref.std()
-        sources = apply_model(model, wav, shifts=args.shifts, split=args.split, progress=True)
+        sources = apply_model(model, wav, shifts=args.shifts, split=args.split, progress=True, denoiser=args.denoiser)
         sources = sources * ref.std() + ref.mean()
 
         track_folder = out / track.name.split(".")[0]
