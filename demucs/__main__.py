@@ -17,7 +17,6 @@ from torch.nn.parallel.distributed import DistributedDataParallel
 
 from .augment import FlipChannels, FlipSign, Remix, Shift
 from .compressed import StemsSet, build_musdb_metadata, get_musdb_tracks
-from .model import Demucs
 from .parser import get_name, get_parser
 from .raw import Rawset
 from .tasnet import ConvTasNet, SeqConvTasNet
@@ -51,7 +50,6 @@ def main():
     eval_folder.mkdir(exist_ok=True, parents=True)
     args.logs.mkdir(exist_ok=True)
     metrics_path = args.logs / f"{name}.json"
-    eval_folder.mkdir(exist_ok=True, parents=True)
     args.checkpoints.mkdir(exist_ok=True, parents=True)
     args.models.mkdir(exist_ok=True, parents=True)
 
@@ -76,8 +74,8 @@ def main():
                                        init_method="tcp://" + args.master,
                                        rank=args.rank,
                                        world_size=args.world_size)
+
     checkpoint = args.checkpoints / f"{name}.th"
-    print(checkpoint)
     checkpoint_tmp = args.checkpoints / f"{name}.th.tmp"
     if args.restart and checkpoint.exists():
         checkpoint.unlink()
@@ -86,32 +84,37 @@ def main():
         args.epochs = 1
         args.repeat = 0
         model = load_model(args.models / args.test)
-    elif args.tasnet:
-        if args.seq:
-            model = SeqConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X, pad=args.pad, band_num=args.band_num,\
-            copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade, skip=args.skip, R=args.R, H=args.H, B=args.B, N=args.N, C=args.C,\
-                L=args.L, dwt=args.dwt, deep_supervision=args.deep_supervision, learnable=args.learnable)
-        else:
-            model = ConvTasNet(audio_channels=args.audio_channels, samplerate=args.samplerate, X=args.X, pad=args.pad, band_num=args.band_num,\
-            copy_TCN=args.copy_TCN, dilation_split=args.dilation_split, cascade=args.cascade, skip=args.skip, R=args.R, H=args.H, B=args.B, N=args.N, C=args.C,\
-                L=args.L, dwt=args.dwt, denoiser=args.denoiser)
     else:
-        model = Demucs(
-            audio_channels=args.audio_channels,
-            channels=args.channels,
-            context=args.context,
-            depth=args.depth,
-            glu=args.glu,
-            growth=args.growth,
-            kernel_size=args.kernel_size,
-            lstm_layers=args.lstm_layers,
-            rescale=args.rescale,
-            rewrite=args.rewrite,
-            sources=4,
-            stride=args.conv_stride,
-            upsample=args.upsample,
-            samplerate=args.samplerate
-        )
+        if args.seq:
+            model = SeqConvTasNet(audio_channels=args.audio_channels,
+                                  stacks=args.stacks,
+                                  pad=args.pad,
+                                  band_num=args.band_num,
+                                  skip=args.skip,
+                                  racks=args.racks,
+                                  hidden_dim=args.hidden_dim,
+                                  bottle_dim=args.bottle_dim,
+                                  enc_dim=args.enc_dim,
+                                  instr_num=args.instr_num,
+                                  transform_window=args.transform_window,
+                                  dwt=args.dwt,
+                                  learnable=args.learnable,
+                                  samplerate=args.sr)
+        else:
+            model = ConvTasNet(audio_channels=args.audio_channels,
+                               stacks=args.stacks,
+                               pad=args.pad,
+                               band_num=args.band_num,
+                               dilation_split=args.dilation_split,
+                               skip=args.skip,
+                               racks=args.racks,
+                               hidden_dim=args.hidden_dim,
+                               bottle_dim=args.bottle_dim,
+                               enc_dim=args.enc_dim,
+                               instr_num=args.instr_num,
+                               transform_window=args.transform_window,
+                               dwt=args.dwt,
+                               samplerate=args.sr)
     model.to(device)
     if args.show:
         print(model)
@@ -139,8 +142,8 @@ def main():
 
     if args.rank == 0:
         done = args.logs / f"{name}.done"
-        # if done.exists():
-        #     done.unlink()
+        if done.exists():
+            done.unlink()
 
     if args.augment:
         augment = nn.Sequential(FlipSign(), FlipChannels(), Shift(args.data_stride),
@@ -163,8 +166,7 @@ def main():
         train_set = Rawset(args.raw / "train",
                            samples=samples + args.data_stride,
                            channels=args.audio_channels,
-                           streams=[0, 1, 2, 3, 4] if args.multi else [0, 1, 2],
-                           stride=args.data_stride)
+                           streams=[0, 1, 2, 3, 4] if args.multi else [0, 1, 2])
 
         valid_set = Rawset(args.raw / "valid", channels=args.audio_channels)
     else:
@@ -173,17 +175,17 @@ def main():
         if args.world_size > 1:
             distributed.barrier()
         metadata = json.load(open(args.metadata))
-        duration = Fraction(samples + args.data_stride, args.sr)
-        stride = Fraction(args.data_stride, args.sr)
+        duration = Fraction(samples + args.data_stride, args.samplerate)
+        stride = Fraction(args.data_stride, args.samplerate)
         train_set = StemsSet(get_musdb_tracks(args.musdb, subsets=["train"], split="train"),
                              metadata,
                              duration=duration,
                              stride=stride,
-                             samplerate=args.sr,
+                             samplerate=args.samplerate,
                              channels=args.audio_channels)
         valid_set = StemsSet(get_musdb_tracks(args.musdb, subsets=["train"], split="valid"),
                              metadata,
-                             samplerate=args.sr,
+                             samplerate=args.samplerate,
                              channels=args.audio_channels)
 
     best_loss = float("inf")
@@ -217,9 +219,7 @@ def main():
                                  seed=args.seed,
                                  workers=args.workers,
                                  world_size=args.world_size,
-                                 C=args.C,
-                                 deep_supervision=args.deep_supervision,
-                                 denoiser=args.denoiser)
+                                 instr_num=args.instr_num)
         model.eval()
         valid_loss = validate_model(epoch,
                                     valid_set,
@@ -229,8 +229,7 @@ def main():
                                     rank=args.rank,
                                     split=args.split_valid,
                                     world_size=args.world_size,
-                                    C=args.C,
-                                    denoiser=args.denoiser)
+                                    instr_num=args.instr_num)
 
         duration = time.time() - begin
         if valid_loss < best_loss:
@@ -274,9 +273,8 @@ def main():
              split=args.split_valid,
              shifts=args.shifts,
              workers=args.eval_workers,
-             samplerate=args.sr,
-             channels=args.audio_channels,
-             denoiser=args.denoiser)
+             samplerate=args.samplerate,
+             channels=args.audio_channels)
     model.to("cpu")
     save_model(model, args.models / f"{name}.th")
     if args.rank == 0:

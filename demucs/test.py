@@ -20,20 +20,21 @@ from .raw import MusDBSet
 from .utils import apply_model
 
 
-def evaluate(model,
-             musdb_path,
-             eval_folder,
-             workers=2,
-             device="cpu",
-             rank=0,
-             save=False,
-             shifts=0,
-             split=False,
-             check=True,
-             world_size=1,
-             samplerate=22050,
-             channels=2,
-             denoiser=False):
+def evaluate(
+    model,
+    musdb_path,
+    eval_folder,
+    workers=2,
+    device="cpu",
+    rank=0,
+    save=False,
+    shifts=0,
+    split=False,
+    check=True,
+    world_size=1,
+    samplerate=22050,
+    channels=2,
+):
     """
     Evaluate model using museval. Run the model
     on a single GPU, the bottleneck being the call to museval.
@@ -47,7 +48,11 @@ def evaluate(model,
     json_folder.mkdir(exist_ok=True, parents=True)
 
     # we load tracks from the original musdb set
-    test_set = MusDBSet(musdb.DB(musdb_path, subsets=["test"], is_wav=False), channels=channels, samplerate=samplerate)
+    test_set = MusDBSet(
+        musdb.DB(musdb_path, subsets=["test"], is_wav=False),
+        channels=channels,
+        samplerate=samplerate,
+    )
 
     for p in model.parameters():
         p.requires_grad = False
@@ -68,12 +73,14 @@ def evaluate(model,
             ref = mix.mean(dim=0)  # mono mixture
             mix = (mix - ref.mean()) / ref.std()
 
-            estimates = apply_model(model, mix.to(device), shifts=shifts, split=split, denoiser=denoiser)
+            estimates = apply_model(model,
+                                    mix.to(device),
+                                    shifts=shifts,
+                                    split=split)
             estimates = estimates * ref.std() + ref.mean()
 
             estimates = estimates.transpose(1, 2)
-            references = th.stack(
-               [accompaniment.t(), vocals.t()])
+            references = th.stack([accompaniment.t(), vocals.t()])
             references = references.numpy()
             estimates = estimates.cpu().numpy()
             if save:
@@ -98,11 +105,11 @@ def evaluate(model,
                     "SDR": sdr[idx].tolist(),
                     "SIR": sir[idx].tolist(),
                     "ISR": isr[idx].tolist(),
-                    "SAR": sar[idx].tolist()
+                    "SAR": sar[idx].tolist(),
                 }
 
                 track_store.add_target(target_name=target, values=values)
                 json_path = json_folder / f"{track_name}.json.gz"
-                gzip.open(json_path, "w").write(track_store.json.encode('utf-8'))
+                gzip.open(json_path, "w").write(track_store.json.encode("utf-8"))
     if world_size > 1:
         distributed.barrier()

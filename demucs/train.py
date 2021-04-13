@@ -26,9 +26,7 @@ def train_model(epoch,
                 workers=4,
                 world_size=1,
                 batch_size=16,
-                C=2,
-                deep_supervision=False,
-                denoiser=False):
+                instr_num=2):
 
     if world_size > 1:
         sampler = DistributedSampler(dataset)
@@ -51,36 +49,20 @@ def train_model(epoch,
         total_loss = 0
         for idx, streams in enumerate(tq):
             if len(streams) < batch_size:
-                # skip uncomplete batch for augment.Remix to work properly
+                # skip incomplete batch for augment.Remix to work properly
                 continue
             streams = streams.to(device)
             sources = streams[:, 1:]
             sources = augment(sources)
             mix = sources.sum(dim=1)
 
-            if denoiser:
-                intermediate, estimates = model(mix)
-            else:
-                estimates = model(mix)
-            if C == 1:
-                estimates = estimates[:,1].unsqueeze(1)
+            estimates = model(mix)
+            if instr_num == 1:
+                estimates = estimates[:, 1].unsqueeze(1)
                 sources = sources[:, 1].unsqueeze(1)
             sources = center_trim(sources, estimates)
 
-            if denoiser:
-                loss = (criterion(estimates, sources) + criterion(intermediate, sources))/2
-                # print('\n')
-                # print(criterion(estimates, sources))
-                # print(criterion(intermediate, sources))
-                # print(loss.item())
-            else:
-                if deep_supervision:
-                    loss = criterion(estimates, torch.cat([sources, sources], dim=1))
-                else:
-                    loss = criterion(estimates, sources)
-                    # print('\n')
-                    # print(criterion(estimates, sources))
-                    # print(loss.item())
+            loss = criterion(estimates, sources)
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -109,8 +91,7 @@ def validate_model(epoch,
                    world_size=1,
                    shifts=0,
                    split=False,
-                   C=2,
-                   denoiser=False):
+                   instr_num=2):
     indexes = range(rank, len(dataset), world_size)
     tq = tqdm.tqdm(indexes,
                    ncols=120,
@@ -127,7 +108,7 @@ def validate_model(epoch,
         sources = streams[1:]
         mix = streams[0]
         estimates = apply_model(model, mix, shifts=shifts, split=split)
-        if C == 1:
+        if instr_num == 1:
             sources = sources[1]
             sources = sources.unsqueeze(0)
         loss = criterion(estimates, sources)

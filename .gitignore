@@ -16,3 +16,5 @@ metadata
 checkpoints/
 *.wav
 *.mp3
+.vscode/*
+demucs/.vscode/*

@@ -57,10 +57,12 @@ class StemsSet:
             if index >= examples:
                 index -= examples
                 continue
-            streams = AudioFile(meta["path"]).read(seek_time=index * self.stride,
-                                                   duration=self.duration,
-                                                   channels=self.channels,
-                                                   samplerate=self.samplerate)
+            streams = AudioFile(meta["path"]).read(
+                seek_time=index * self.stride,
+                duration=self.duration,
+                channels=self.channels,
+                samplerate=self.samplerate,
+            )
             return (streams - meta["mean"]) / meta["std"]
 
 
@@ -69,7 +71,11 @@ def _get_track_metadata(path):
     # normalized but it should be good enough.
     audio = AudioFile(path)
     mix = audio.read(streams=0, channels=1, samplerate=44100)
-    return {"duration": audio.duration, "std": mix.std().item(), "mean": mix.mean().item()}
+    return {
+        "duration": audio.duration,
+        "std": mix.std().item(),
+        "mean": mix.mean().item(),
+    }
 
 
 def build_metadata(tracks, workers=10):

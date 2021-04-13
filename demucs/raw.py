@@ -124,7 +124,6 @@ class MusDBSet:
 
     def __getitem__(self, index):
         track = self.mus.tracks[index]
-          
         return (track.name, AudioFile(track.path).read(channels=self.channels,
                                                        seek_time=0,
                                                        streams=self.streams,
@@ -142,7 +141,7 @@ def build_raw(mus, destination, normalize, workers, samplerate, channels, multi=
             streams[1] = streams[1] + streams[2] + streams[3]
             streams[2] = streams[4]
             streams = streams[:3]
-        
+
         if normalize:
             ref = streams[0].mean(dim=0)  # use mono mixture as reference
             streams = (streams - ref.mean()) / ref.std()
@@ -164,13 +163,13 @@ def main():
               args.destination / "train",
               normalize=True,
               channels=args.channels,
-              samplerate=args.sr,
+              samplerate=args.samplerate,
               workers=args.workers,
               multi=False)
     build_raw(musdb.DB(root=args.musdb, subsets=["train"], split="valid", is_wav=False),
               args.destination / "valid",
               normalize=True,
-              samplerate=args.sr,
+              samplerate=args.samplerate,
               channels=args.channels,
               workers=args.workers,
               multi=False)
