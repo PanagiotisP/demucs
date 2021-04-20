@@ -31,6 +31,7 @@ class SavedState:
     last_state: dict = None
     best_state: dict = None
     optimizer: dict = None
+    bad_epochs: int = 0
 
 
 def main():
@@ -204,7 +205,10 @@ def main():
     else:
         dmodel = model
 
+    bad_epochs = saved.bad_epochs
     for epoch in range(len(saved.metrics), args.epochs):
+        if bad_epochs >= 20:
+            break
         begin = time.time()
         model.train()
         train_loss = train_model(epoch,
@@ -238,11 +242,15 @@ def main():
                 key: value.to("cpu").clone()
                 for key, value in model.state_dict().items()
             }
+            bad_epochs = 0
+        else:
+            bad_epochs += 1
         saved.metrics.append({
             "train": train_loss,
             "valid": valid_loss,
             "best": best_loss,
-            "duration": duration
+            "duration": duration,
+            "bad_epochs": bad_epochs
         })
         if args.rank == 0:
             json.dump(saved.metrics, open(metrics_path, "w"))

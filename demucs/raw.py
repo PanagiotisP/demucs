@@ -102,7 +102,7 @@ class Rawset:
             file.seek(offset)
             content = file.read(to_read)
             assert len(content) == to_read
-            content = np.frombuffer(content, dtype=np.float32)
+            content = np.array(np.frombuffer(content, dtype=np.float32))
             streams.append(th.from_numpy(content).view(length, self.channels).t())
         return th.stack(streams, dim=0)
 

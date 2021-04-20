@@ -14,7 +14,7 @@ def get_parser():
         "--raw",
         type=Path,
         help="Path to raw audio, can be faster, see python3 -m demucs.raw to extract.",
-    )
+        default=Path("../../../../../gpu-data2/ppap/raw_musdb"))
     parser.add_argument("--no_raw", action="store_const", const=None, dest="raw")
     parser.add_argument("--multi", action="store_true")
     parser.add_argument("--band_num", type=int, default=1)
@@ -38,7 +38,8 @@ def get_parser():
         default="none",
         help="Adds a learnable layer to match DWT transformation",
     )
-    parser.add_argument("-m", "--musdb", type=Path, help="Path to musdb root")
+    parser.add_argument("-m", "--musdb", type=Path, help="Path to musdb root",
+        default=Path("../../../../../gpu-data2/ppap/musdb18"))
     parser.add_argument("--metadata", type=Path, default=Path("metadata/musdb.json"))
     parser.add_argument("--sr", type=int, default=22050)
     parser.add_argument("--audio_channels", type=int, default=2)
@@ -74,7 +75,7 @@ def get_parser():
     parser.add_argument(
         "--checkpoints",
         type=Path,
-        default=Path("../../../../../gpu-data2/ppap/checkpoints"),
+        default=Path("../../../../../gpu-data2/ppap/tasnet_checkpoints_paper"),
         help="Folder where to store checkpoints etc",
     )
     parser.add_argument(
